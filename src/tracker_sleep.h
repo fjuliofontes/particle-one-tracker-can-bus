@@ -308,6 +308,14 @@ public:
   }
 
   /**
+   * @brief Return sleep hold.
+   *
+   */
+  bool getSleepMode() {
+    return _holdSleep;
+  }
+
+  /**
    * @brief Extend execution time accumulatively before going back to sleep.
    *
    * @param seconds Number of seconds to extend the execution phase.
