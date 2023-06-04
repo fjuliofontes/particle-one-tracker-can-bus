@@ -30,6 +30,12 @@ PRODUCT_ID(TRACKER_PRODUCT_ID);
 #endif
 PRODUCT_VERSION(TRACKER_PRODUCT_VERSION);
 
+// Wait x ms before requesting after a power on
+#define REQUEST_WAIT_POWER_ON 15000 // 15 sec
+
+// Resume sleep mode after x seconds
+#define RESUME_SLEEP_WAIT_PERIOD 10000 // 10 sec
+
 SerialLogHandler logHandler(115200, LOG_LEVEL_TRACE, {
     { "app.can", LOG_LEVEL_INFO },
     { "app.gps.nmea", LOG_LEVEL_INFO },
@@ -58,8 +64,8 @@ byte obdRequestSPEED[8] = {0x02, SERVICE_CURRENT_DATA, PID_VEHICLE_SPEED, 0x55, 
 unsigned long requestRpmLastMillis = 0;
 unsigned long requestSpeedLastMillis = 0;
 
-const unsigned long requestRpmPeriod = 100; // in milliseconds (10 times per second)
-const unsigned long requestSpeedPeriod = 100; // in milliseconds (10 times per second)
+const unsigned long requestRpmPeriod = 200; // in milliseconds (5 times per second)
+const unsigned long requestSpeedPeriod = 200; // in milliseconds (5 times per second)
 
 // Various engine stats that we maintain
 int lastRPM = 0, lastSPEED = 0;
@@ -70,6 +76,15 @@ int nonIdleSamplesRPM = 0, nonIdleSamplesSPEED = 0;
 int nonIdleSumRPM = 0, nonIdleSumSPEED = 0;
 int nonIdleMinRPM = 0, nonIdleMinSPEED = 0;
 int nonIdleMaxRPM = 0, nonIdleMaxSPEED = 0;
+
+// Last ignition signal
+bool lastIgnition = false;
+
+// For start requesting after power on
+unsigned long lastIgnitionOnMillis = 0;
+
+// For entering in sleeping mode
+unsigned long lastIgnitionOffMillis = 0;
 
 // We log to debug serial more frequently than publishing, but not at every request since that
 // will generate too much data.
@@ -145,12 +160,14 @@ void setup()
         Log.error("CAN initialization failed %d", status);
     }
 
-    // Change to normal mode to allow messages to be transmitted. If you don't do this,
-    // the CAN chip will be in loopback mode.
-    canInterface.setMode(MCP_MODE_NORMAL);   
+    // Change to Sleep mode
+    canInterface.setMode(MCP_MODE_SLEEP);   
 
     // Connect to the cloud!
     Particle.connect();
+
+    // Debug initialization
+    Log.info("Initialization done!");
 }
 
 void loop()
@@ -159,16 +176,35 @@ void loop()
     Tracker::instance().loop();
 
     // Key in?
-    bool keyIn = digitalRead(D9) == 1;
+    bool ignition = digitalRead(D9) == 1;
+
+    // detect if the car was enabled just now
+    /// off to on signal
+    if ((lastIgnition != ignition) && ignition == true) {
+        // update lastIgnitionOnMillis
+        lastIgnitionOnMillis = millis();
+        // change state to normal mode
+        canInterface.setMode(MCP_MODE_NORMAL);
+    } 
+    // on to off signal
+    else if (lastIgnition != ignition) {
+        // update lastIgnitionOffMillis
+        lastIgnitionOffMillis = millis();
+        // go back to sleep mode!
+        canInterface.setMode(MCP_MODE_SLEEP);
+    }
+
+    // update lastIgnition
+    lastIgnition = ignition;
 
     // Prevent sleep mode when connected!
-    if (keyIn && !Tracker::instance().sleep.isSleepDisabled() && !Tracker::instance().sleep.getSleepMode()) {
+    if (ignition && !Tracker::instance().sleep.isSleepDisabled() && !Tracker::instance().sleep.getSleepMode()) {
         // Don't allow the device to go asleep if wake-up pin is set
         Log.info("Pausing sleep mode!");
         Tracker::instance().sleep.pauseSleep();
     } 
     
-    else if (!keyIn && !Tracker::instance().sleep.isSleepDisabled() && Tracker::instance().sleep.getSleepMode()) {
+    else if (!ignition && (millis() - lastIgnitionOffMillis) >= RESUME_SLEEP_WAIT_PERIOD && !Tracker::instance().sleep.isSleepDisabled() && Tracker::instance().sleep.getSleepMode()) {
         // Resume sleep mode
         Log.info("Resuming sleep mode!");
         Tracker::instance().sleep.resumeSleep();
@@ -238,7 +274,7 @@ void loop()
         static bool errorFlag = false;
 
         // Send a request for engine RPM via OBD-II (CAN)
-        if (keyIn) {
+        if (ignition && (millis() - lastIgnitionOnMillis) >= REQUEST_WAIT_POWER_ON) {
             byte sndStat = canInterface.sendMsgBuf(OBD_CAN_REQUEST_ID, 0, 8, obdRequestRPM);
             if(sndStat == CAN_OK) {
                 errorFlag = false;
@@ -290,7 +326,7 @@ void loop()
         static bool errorFlag = false;
 
         // Send a request for engine RPM via OBD-II (CAN)
-        if (keyIn) {
+        if (ignition && (millis() - lastIgnitionOnMillis) >= REQUEST_WAIT_POWER_ON) {
             byte sndStat = canInterface.sendMsgBuf(OBD_CAN_REQUEST_ID, 0, 8, obdRequestSPEED);
             if(sndStat == CAN_OK) {
                 errorFlag = false;
